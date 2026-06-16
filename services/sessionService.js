@@ -15,7 +15,7 @@ const getAllSessions = async (user_id) => {
     [user_id],
   );
   
-  // Kueri ini menggabungkan sesi, nama dokumen, skor benar, total soal, dan perubahan Theta
+  //sesi, nama dokumen, skor benar, total soal, dan perubahan Theta
   const query = `
         SELECT 
             s.session_id, 
@@ -97,9 +97,7 @@ const startSession = async (user_id, document_id) => {
   return { session_id };
 };
 
-// ============================================================================
-// 2. Ambil Soal Adaptif (Integrasi T5 secara Real-Time)
-// ============================================================================
+// Soal adaptif secara real-time
 const getNextQuestion = async (session_id, user_id, document_id) => {
   // A. Ambil nilai Theta saat ini
   const abilityQuery = await pool.query(
@@ -257,9 +255,7 @@ const getSessionSummary = async (session_id) => {
   };
 };
 
-// ============================================================================
 // 3. Evaluasi Jawaban & Update Theta (Logika IRT)
-// ============================================================================
 const submitAnswer = async (session_id, user_id, question_id, user_answer) => {
   // A. Ambil options (untuk mencocokkan huruf ke teks), correct_answer, dan b_parameter
   const qResult = await pool.query(

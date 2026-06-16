@@ -16,7 +16,7 @@ const REFRESH_TOKEN_SCHEMA = Joi.object({
 }).unknown(true);
 
 const DOCUMENT_SCHEMA = Joi.object({
-    file_name: Joi.string().max(100).required()
+    file_name: Joi.string().max(250).required()
 }).unknown(true);
 
 const SESSION_SCHEMA = Joi.object({

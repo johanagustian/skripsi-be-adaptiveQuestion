@@ -3,90 +3,84 @@ const fs = require('fs');
 const pdfParse = require('pdf-parse')
 const pool = require('../db');
 
+const TurndownService = require('turndown');
+
+const turndownService = new TurndownService();
+
+const convertToCleanMarkdown = (text) => {
+    // Ubah ke format Markdown untuk mendapatkan struktur semantik
+    let md = turndownService.turndown(text);
+
+    return md
+        // Hapus Heading (Header/Judul Halaman/Footer yang jadi Heading)
+        .replace(/^#+.*$/gm, '') 
+        // Hapus baris metadata jurnal yang pendek atau mengandung keyword
+        .split('\n')
+        .filter(line => {
+            const trimmed = line.trim();
+            // Filter baris pendek (noise)
+            if (trimmed.length < 40) return false;
+            // Filter keyword sampah jurnal
+            if (/^(page|volume|number|journal|sa jse|copyright|\d+)/i.test(trimmed)) return false;
+            return true;
+        })
+        .join('\n\n')
+        .replace(/\s+/g, ' ')
+        .trim();
+};
+
 // Chunking ( Sliding Window + Sentence Boundary)
-const chunkTextWithOverlap = (text, maxChars = 1200, overlap = 200) => {
-    // Bersihkan spasi/enter berlebih bawaan ekstraksi PDF
-    const cleanText = text.replace(/\s+/g, ' ').trim();
+const chunkText = (text, chunkSize = 1200, overlap = 200) => {
     const chunks = [];
-    let startIndex = 0;
-
-    while (startIndex < cleanText.length) {
-        let endIndex = startIndex + maxChars;
-
-        // Cari tanda titik terakhir agar kalimat tidak terpotong di tengah jalan
-        if (endIndex < cleanText.length) {
-            const lastPeriod = cleanText.lastIndexOf('. ', endIndex);
-            
-            // Pastikan titik tidak terlalu jauh ke belakang
-            if (lastPeriod > startIndex + overlap) {
-                endIndex = lastPeriod + 1; 
-            }
+    const splitRecursively = (txt) => {
+        if (txt.length <= chunkSize) {
+            if (txt.length > 200) chunks.push(txt);
+            return;
         }
-
-        const chunk = cleanText.substring(startIndex, endIndex).trim();
-        
-        // Simpan jika chunk cukup panjang dan bermakna (lebih dari 50 karakter)
-        if (chunk.length > 50) { 
-            chunks.push(chunk);
-        }
-
-        // Geser mundur sedikit untuk menciptakan overlap (menjaga konteks)
-        startIndex = endIndex - overlap; 
-    }
-
-    return chunks;
+        // Mencari titik potong di akhir kalimat (titik) atau paragraf
+        const splitIdx = txt.lastIndexOf('. ', chunkSize) + 1 || txt.lastIndexOf('\n', chunkSize);
+        const cut = splitIdx > 0 ? splitIdx : chunkSize;
+        chunks.push(txt.substring(0, cut).trim());
+        splitRecursively(txt.substring(cut - overlap).trim());
+    };
+    splitRecursively(text);
+    return [...new Set(chunks)];
 };
 
 const saveDocument = async (user_id, file_name, file_path) => {
-    // Kita gunakan Transaction agar kalau terjadi error di tengah jalan, 
-    // semua query di-rollback (dibatalkan) sehingga DB tetap bersih.
-    const client = await pool.connect(); 
-
+    const client = await pool.connect();
     try {
-        await client.query('BEGIN'); 
-
+        await client.query('BEGIN');
+        
         const document_id = `doc-${crypto.randomUUID()}`;
-        const uploaded_at = new Date().toISOString();
-
-        // 1. Simpan data dokumen fisik ke tabel documents
-        await client.query(
-            'INSERT INTO documents (document_id, user_id, file_name, file_path, uploaded_at) VALUES ($1, $2, $3, $4, $5)',
-            [document_id, user_id, file_name, file_path, uploaded_at]
-        );
-
-        // 2. Baca isi teks mentah dari file PDF yang baru di-upload
         const dataBuffer = fs.readFileSync(file_path);
         const pdfData = await pdfParse(dataBuffer);
-        const fullText = pdfData.text;
+        
+        // Alur Bersih: Parse -> Clean Markdown -> Chunk -> Save
+        const cleanedText = convertToCleanMarkdown(pdfData.text);
+        const validChunks = chunkText(cleanedText);
 
-        // 3. Eksekusi Chunking 
-        const validChunks = chunkTextWithOverlap(fullText, 1200, 200);
+        if (validChunks.length === 0) throw new Error('Gagal mengekstrak isi konten.');
 
-        if (validChunks.length === 0) {
-            throw new Error('Tidak ada teks yang bisa diekstrak dari dokumen ini.');
-        }
-
-        // 4. Looping untuk menyimpan setiap potongan teks ke tabel document_chunks
-        for (const textChunk of validChunks) {
-            const chunk_id = `chunk-${crypto.randomUUID()}`;
+        await client.query(
+            'INSERT INTO documents (document_id, user_id, file_name, file_path) VALUES ($1, $2, $3, $4)',
+            [document_id, user_id, file_name, file_path]
+        );
+        
+        for (const chunk of validChunks) {
             await client.query(
                 'INSERT INTO document_chunks (chunk_id, document_id, context_text) VALUES ($1, $2, $3)',
-                [chunk_id, document_id, textChunk]
+                [`chunk-${crypto.randomUUID()}`, document_id, chunk]
             );
         }
 
-        await client.query('COMMIT'); // Berhasil! Kunci permanen penyimpanan.
-        
-        return { 
-            document_id, 
-            total_chunks: validChunks.length 
-        };
-
-    } catch (error) {
-        await client.query('ROLLBACK'); // Batalkan semua simpanan karena ada error
-        throw error;
+        await client.query('COMMIT');
+        return { document_id, total_chunks: validChunks.length };
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
     } finally {
-        client.release(); // Kembalikan koneksi ke pool agar tidak terjadi memory leak
+        client.release();
     }
 };
 

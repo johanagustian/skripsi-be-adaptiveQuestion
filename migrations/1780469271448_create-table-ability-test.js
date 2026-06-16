@@ -44,6 +44,10 @@ export const up = (pgm) => {
             type: 'VARCHAR(20)',
             notNull: true
         },
+        reading_context: {
+            type: 'TEXT',
+            notNull: true
+        },
         question_text: {
             type: 'TEXT',
             notNull: true

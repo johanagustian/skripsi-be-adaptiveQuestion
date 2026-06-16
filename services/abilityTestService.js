@@ -1,5 +1,7 @@
 const axios = require("axios");
 const pool = require("../db");
+const crypto = require('crypto');
+
 const ABILITY_TEST_CONTEXT = require("../utils/abilityTestContext");
 
 const AI_SERVICE_URL = "http://localhost:8000/generate";
@@ -22,81 +24,67 @@ const checkUserStatus = async (user_id) => {
   return 'New user'
 };
 
+const getContextParts = () => {
+  // Anda perlu menyesuaikan regex ini sesuai format string di abilityTestContext.js
+  const parts = ABILITY_TEST_CONTEXT.split(/Context \d+/).filter(p => p.trim() !== "");
+  return parts;
+};
+
 const generateQuestionsForUser = async (user_id) => {
   const client = await pool.connect();
+  const contextParts = getContextParts(); // 5 konteks
 
   try {
     await client.query("BEGIN");
-
     const session_id = `at-${crypto.randomUUID()}`;
-
-    await client.query(
-      "INSERT INTO ability_test_sessions (session_id, user_id) VALUES ($1, $2)",
-      [session_id, user_id],
-    );
-
-    const difficulties = [
-      "middle", "middle", "middle", "middle", "middle",
-      "high", "high", "high", "high", "high",
-    ];
+    await client.query("INSERT INTO ability_test_sessions (session_id, user_id) VALUES ($1, $2)", [session_id, user_id]);
 
     const generatedQuestions = [];
+    const difficulties = ["middle", "high"];
 
-    const aiRequests = difficulties.map((diff) =>
-      axios.post(AI_SERVICE_URL, {
-        difficulty: diff,
-        context: ABILITY_TEST_CONTEXT,
-        mode_kreatif: true,
-      }),
-    );
+    // Loop per konteks
+    for (let i = 0; i < contextParts.length; i++) {
+      const currentContext = contextParts[i].trim();
 
-    // Tunggu semua request selesai berbarengan
-    const aiResponses = await Promise.all(aiRequests);
+      for (const diff of difficulties) {
+        // Panggil AI dengan konteks spesifik
+        const response = await axios.post(AI_SERVICE_URL, {
+          difficulty: diff,
+          context: currentContext, // Mengirim konteks spesifik
+          mode_kreatif: true,
+        });
 
-    // Baru kita simpan ke database dengan urutan yang sama
-    for (let i = 0; i < aiResponses.length; i++) {
-      const questionData = aiResponses[i].data;
-      const diff = difficulties[i];
-      const itemId = `itm-${crypto.randomUUID()}`;
+        const questionData = response.data;
+        const itemId = `itm-${crypto.randomUUID()}`;
 
-      await client.query(
-        `INSERT INTO ability_test_items (item_id, session_id, difficulty_level, question_text, options, correct_answer) 
-         VALUES ($1, $2, $3, $4, $5, $6)`, 
-        [
-          itemId,
-          session_id,
-          diff,
-          questionData.question_text,
-          JSON.stringify(questionData.options),
-          questionData.correct_answer,
-        ]
-      );
+        await client.query(
+          `INSERT INTO ability_test_items (item_id, session_id, difficulty_level, question_text, options, correct_answer, reading_context) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [itemId, session_id, diff, questionData.question_text, JSON.stringify(questionData.options), questionData.correct_answer, currentContext]
+        );
 
-      generatedQuestions.push({
-        item_id: itemId,
-        difficulty: diff,
-        question_text: questionData.question_text,
-        options: questionData.options,
-      });
+        generatedQuestions.push({
+          item_id: itemId,
+          difficulty: diff,
+          question_text: questionData.question_text,
+          options: questionData.options,
+          reading_context: currentContext // Kirim ke frontend
+        });
+      }
     }
 
     await client.query("COMMIT");
-
-    return {
-      session_id,
-      context: ABILITY_TEST_CONTEXT,
-      questions: generatedQuestions,
-    };
+    return { session_id, questions: generatedQuestions };
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Transaksi gagal, melakukan rollback:", error.message);
+    throw error;
   } finally {
     client.release();
   }
 };
 
 const evaluateAndSaveTheta = async (user_id, session_id, answers) => {
-  // 1. Tambahkan 'options' pada SELECT untuk mencocokkan A/B/C/D dengan teks jawaban
+  // 1. 'options' pada SELECT untuk mencocokkan A/B/C/D dengan teks jawaban
   const dbItems = await pool.query(
     "SELECT item_id, options, correct_answer FROM ability_test_items WHERE session_id = $1",
     [session_id],
