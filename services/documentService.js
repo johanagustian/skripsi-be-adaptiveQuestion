@@ -8,7 +8,7 @@ const TurndownService = require('turndown');
 const turndownService = new TurndownService();
 
 const convertToCleanMarkdown = (text) => {
-    // Ubah ke format Markdown untuk mendapatkan struktur semantik
+    // Ubah ke format Markdown
     let md = turndownService.turndown(text);
 
     return md
@@ -37,6 +37,7 @@ const chunkText = (text, chunkSize = 1200, overlap = 200) => {
             if (txt.length > 200) chunks.push(txt);
             return;
         }
+
         // Mencari titik potong di akhir kalimat (titik) atau paragraf
         const splitIdx = txt.lastIndexOf('. ', chunkSize) + 1 || txt.lastIndexOf('\n', chunkSize);
         const cut = splitIdx > 0 ? splitIdx : chunkSize;
@@ -108,7 +109,7 @@ const getDocumentById = async (document_id, user_id) => {
 };
 
 const deleteDocument = async (document_id, user_id) => {
-    // 1. Cari path file fisik terlebih dahulu dan pastikan dokumen ini milik user yang sedang login
+    
     const docResult = await pool.query(
         'SELECT file_path FROM documents WHERE document_id = $1 AND user_id = $2',
         [document_id, user_id]
@@ -127,8 +128,7 @@ const deleteDocument = async (document_id, user_id) => {
         [document_id, user_id]
     );
 
-    // 3. Hapus file fisik PDF dari folder uploads/
-    // Cek dulu apakah filenya benar-benar ada di hard disk sebelum dihapus
+    // Hapus file fisik PDF dari folder uploads
     if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
     }
@@ -136,5 +136,4 @@ const deleteDocument = async (document_id, user_id) => {
     return { document_id };
 };
 
-// Jangan lupa tambahkan deleteDocument di exports
 module.exports = { saveDocument, getDocumentsByUser, getDocumentById, deleteDocument };

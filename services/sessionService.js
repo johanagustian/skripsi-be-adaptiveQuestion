@@ -3,7 +3,6 @@ const crypto = require("crypto");
 const pool = require("../db");
 
 // Lihat semua sesion (riwayat sesi)
-// Lihat semua sesi (riwayat sesi dengan detail lengkap)
 const getAllSessions = async (user_id) => {
   await pool.query(
     `
@@ -50,11 +49,11 @@ const getAllSessions = async (user_id) => {
     return { message: "Belum ada riwayat ujian." };
   }
 
-  // Format data agar sesuai dengan penamaan variabel di Frontend (HomePage.jsx)
   const formattedData = result.rows.map((row) => {
-    // Ambil desimal selisih theta, format ke +0.xxx atau -0.xxx
     let delta = row.theta_increase ? parseFloat(row.theta_increase) : 0;
+
     delta = Math.round(delta * 1000) / 1000;
+
     const formattedDelta = delta > 0 ? `+${delta}` : `${delta}`;
 
     return {
@@ -70,7 +69,7 @@ const getAllSessions = async (user_id) => {
   return formattedData;
 };
 
-// 1. Mulai Sesi Baru
+// Mulai Sesi Baru
 const startSession = async (user_id, document_id) => {
   const session_id = `session-${crypto.randomUUID()}`;
 
@@ -79,7 +78,6 @@ const startSession = async (user_id, document_id) => {
     [session_id, user_id, document_id],
   );
 
-  // Cek dan inisialisasi nilai kemampuan (theta) jika user baru pertama kali ujian
   const abilityCheck = await pool.query(
     "SELECT theta_score FROM user_abilities WHERE user_id = $1",
     [user_id],
@@ -97,25 +95,24 @@ const startSession = async (user_id, document_id) => {
   return { session_id };
 };
 
-// Soal adaptif secara real-time
 const getNextQuestion = async (session_id, user_id, document_id) => {
-  // A. Ambil nilai Theta saat ini
+
+  // cek kemampuan awal
   const abilityQuery = await pool.query(
     "SELECT theta_score FROM user_abilities WHERE user_id = $1",
     [user_id],
   );
   const current_theta = abilityQuery.rows[0]?.theta_score || 0.0;
 
-  // B. Tentukan Tingkat Kesulitan (Rules IRT)
   let difficulty_str = "middle";
-  let expected_b_parameter = 0.5;
+  let expected_b_parameter = -0.5;
 
-  if (current_theta > 0.5) {
+  if (current_theta > 0) {
     difficulty_str = "high";
-    expected_b_parameter = 1.0;
+    expected_b_parameter = 5.0;
   }
 
-  // C. Ambil 1 teks potongan (chunk) secara acak dari database sebagai bahan bacaan
+  // Ambil satu chunk acak dari dokumen yang dipilih
   const chunkQuery = `
         SELECT chunk_id, context_text 
         FROM document_chunks 
@@ -129,12 +126,13 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
       "Dokumen belum dipotong (chunking) atau tidak memiliki teks.",
     );
   }
+
   const rowData = chunkResult.rows[0];
   const selectedChunkText = rowData.context_text?.toLowerCase() || "";
 
-  // D. Tembak API Model AI (Python)
+  // Tembak API Model AI 
   try {
-    // Sesuaikan dengan port FastAPI kamu
+
     const pythonApiUrl = "http://localhost:8000/generate";
 
     const aiResponse = await axios.post(pythonApiUrl, {
@@ -142,12 +140,11 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
       context: selectedChunkText,
     });
 
-    const generatedData = aiResponse.data;
-
-    // E. Simpan soal baru ke database (Perhatikan kita pakai chunk_id sekarang)
+    const generatedData = aiResponse.data;    
     const question_id = `qst-${crypto.randomUUID()}`;
     const optionsJson = JSON.stringify(generatedData.options);
 
+    // Simpan soal baru ke database (Perhatikan kita pakai chunk_id sekarang)
     await pool.query(
       `INSERT INTO generate_questions (question_id, chunk_id, question_text, options, correct_answer, difficulty_level, b_parameter) 
              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -162,10 +159,9 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
       ],
     );
 
-    // F. Kembalikan format JSON rapi ke Frontend
     return {
       question_id: question_id,
-      reading_context: rowData.context_text, // Frontend akan menampilkan teks ini di samping soal
+      reading_context: rowData.context_text,
       question_text: generatedData.question_text,
       options: generatedData.options,
       difficulty_level: difficulty_str,
@@ -179,6 +175,7 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
 };
 
 const getSessionSummary = async (session_id) => {
+
   const sessionCheck = await pool.query(
     `SELECT s.session_id, d.file_name 
         FROM sessions s
@@ -195,10 +192,9 @@ const getSessionSummary = async (session_id) => {
     throw error;
   }
 
-  // Sekarang akses fileName dengan aman
   const fileName = sessionData.file_name;
 
-  // 1. Ambil seluruh riwayat jawaban beserta data tingkat kesulitan soalnya
+  // Mengambil seluruh riwayat jawaban serta data tingkat kesulitan soalnya
   const query = `
         SELECT 
             lh.is_correct, 
@@ -219,7 +215,7 @@ const getSessionSummary = async (session_id) => {
     return { message: "Belum ada soal yang dijawab pada sesi ini." };
   }
 
-  // 2. Hitung statistik dasar (Benar/Salah)
+  // Hitung statistik dasar (Benar/Salah)
   const total_correct = answers.filter((a) => a.is_correct === true).length;
   const total_wrong = total_questions_answered - total_correct;
 
@@ -233,11 +229,11 @@ const getSessionSummary = async (session_id) => {
 
   // 4. Format data array (Time-series) khusus untuk grafik (Chart) di frontend
   const chart_data = answers.map((ans, index) => ({
-    step: index + 1, // Sumbu X: Urutan soal ke-1, ke-2, dst
-    theta_score: ans.theta_after, // Sumbu Y1: Grafik garis perkembangan Theta
-    difficulty: ans.difficulty_level, // Label Tooltip: 'middle', 'high'
-    b_parameter: ans.b_parameter, // Sumbu Y2 (Opsional): Grafik level kesulitan soal
-    is_correct: ans.is_correct, // Indikator warna (Misal: Hijau jika true, Merah jika false)
+    step: index + 1,
+    theta_score: ans.theta_after,
+    difficulty: ans.difficulty_level,
+    b_parameter: ans.b_parameter,
+    is_correct: ans.is_correct,
   }));
 
   return {
@@ -255,9 +251,10 @@ const getSessionSummary = async (session_id) => {
   };
 };
 
-// 3. Evaluasi Jawaban & Update Theta (Logika IRT)
+// Real-time update jawaban user dan perhitungan Theta
 const submitAnswer = async (session_id, user_id, question_id, user_answer) => {
-  // A. Ambil options (untuk mencocokkan huruf ke teks), correct_answer, dan b_parameter
+  
+  // Mengambil jawaban dan jawaban benar dari database untuk soal yang diberikan
   const qResult = await pool.query(
     `SELECT 
             options, 
@@ -287,7 +284,6 @@ const submitAnswer = async (session_id, user_id, question_id, user_answer) => {
     selectedText.trim().toLowerCase() ===
     question.correct_answer.trim().toLowerCase();
   const S = is_correct ? 1 : 0;
-  const b_parameter = question.b_parameter;
 
   // C. Ambil Theta (Kemampuan) user saat ini
   const abilityResult = await pool.query(
@@ -296,13 +292,8 @@ const submitAnswer = async (session_id, user_id, question_id, user_answer) => {
   );
   let current_theta = abilityResult.rows[0]?.theta_score || 0.0;
 
-  // D. Hitung Probabilitas IRT (Model Rasch / 1PL)
-  // P(theta) = 1 / (1 + e^-(theta - b))
-  const probability_irt = 1 / (1 + Math.exp(-(current_theta - b_parameter)));
-
-  // E. Hitung Theta Baru (Pembaruan dinamis)
-  const learning_rate = 0.15; // Sensitivitas perubahan (bisa di-tuning nanti)
-  const new_theta = current_theta + learning_rate * (S - probability_irt);
+  const probability_irt = await probabiltyIRT(current_theta, question.b_parameter);
+  const new_theta = await updateTheta(current_theta, S, probability_irt);
 
   // F. Simpan riwayat jawaban ke database
   const history_id = `hist-${crypto.randomUUID()}`;
@@ -324,16 +315,14 @@ const submitAnswer = async (session_id, user_id, question_id, user_answer) => {
     ],
   );
 
-  // G. Timpa nilai Theta lama di tabel user_abilities
   await pool.query(
     "UPDATE user_abilities SET theta_score = $1 WHERE user_id = $2",
     [new_theta, user_id],
   );
 
-  // H. Kembalikan hasil evaluasi ke Frontend
   return {
     is_correct: is_correct,
-    correct_answer: question.correct_answer, // Tetap kembalikan teks aslinya sebagai feedback
+    correct_answer: question.correct_answer,
     old_theta: current_theta,
     new_theta: new_theta,
     explanation: is_correct
@@ -342,13 +331,20 @@ const submitAnswer = async (session_id, user_id, question_id, user_answer) => {
   };
 };
 
+const probabiltyIRT = async (theta, b_parameter) => {
+  return 1 / (1 + Math.exp(-(theta - b_parameter)));
+};
+
+const updateTheta = async (current_theta, S, probability_irt, learning_rate = 0.15) => {
+  return current_theta + learning_rate * (S - probability_irt);
+}
+
 const terminateSession = async (session_id) => {
   // Opsional: Kunci sesi jika tabel sessions memiliki kolom status
   // await pool.query("UPDATE sessions SET status = 'completed' WHERE session_id = $1", [session_id]);
   return true;
 };
 
-// B. Mengambil detail soal, jawaban user, dan kunci jawaban untuk proses review
 const getSessionReview = async (session_id, user_id) => {
   const sessionCheck = await pool.query(
     `SELECT session_id FROM sessions WHERE session_id = $1`,
@@ -356,7 +352,6 @@ const getSessionReview = async (session_id, user_id) => {
   );
 
   if (sessionCheck.rows.length === 0) {
-    // Lemparkan error agar ditangkap oleh blok catch di controller
     const error = new Error("Sesi tidak ditemukan atau tidak valid");
     error.statusCode = 404;
     throw error;

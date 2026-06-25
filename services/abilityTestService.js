@@ -32,25 +32,24 @@ const getContextParts = () => {
 
 const generateQuestionsForUser = async (user_id) => {
   const client = await pool.connect();
-  const contextParts = getContextParts(); // 5 konteks
+  const contextParts = getContextParts();
 
   try {
     await client.query("BEGIN");
-    const session_id = `at-${crypto.randomUUID()}`;
+
+    const session_id = `sess-ab-test-${crypto.randomUUID()}`;
     await client.query("INSERT INTO ability_test_sessions (session_id, user_id) VALUES ($1, $2)", [session_id, user_id]);
 
     const generatedQuestions = [];
     const difficulties = ["middle", "high"];
 
-    // Loop per konteks
     for (let i = 0; i < contextParts.length; i++) {
       const currentContext = contextParts[i].trim();
 
       for (const diff of difficulties) {
-        // Panggil AI dengan konteks spesifik
         const response = await axios.post(AI_SERVICE_URL, {
           difficulty: diff,
-          context: currentContext, // Mengirim konteks spesifik
+          context: currentContext,
           mode_kreatif: true,
         });
 
@@ -68,7 +67,7 @@ const generateQuestionsForUser = async (user_id) => {
           difficulty: diff,
           question_text: questionData.question_text,
           options: questionData.options,
-          reading_context: currentContext // Kirim ke frontend
+          reading_context: currentContext
         });
       }
     }
@@ -84,9 +83,8 @@ const generateQuestionsForUser = async (user_id) => {
 };
 
 const evaluateAndSaveTheta = async (user_id, session_id, answers) => {
-  // 1. 'options' pada SELECT untuk mencocokkan A/B/C/D dengan teks jawaban
   const dbItems = await pool.query(
-    "SELECT item_id, options, correct_answer FROM ability_test_items WHERE session_id = $1",
+    "SELECT item_id, options, correct_answer, reading_context FROM ability_test_items WHERE session_id = $1",
     [session_id],
   );
 
@@ -97,38 +95,26 @@ const evaluateAndSaveTheta = async (user_id, session_id, answers) => {
   const total_soal = 10;
   let jumlah_benar = 0;
 
-  // 2. Kamus konversi huruf ke indeks opsi
   const letterToIndex = { 'A': 0, 'B': 1, 'C': 2, 'D': 3 };
 
   answers.forEach((userAns) => {
-    // Sesuaikan properti dengan schema Joi (menggunakan question_id)
-    const dbAnswer = dbItems.rows.find((q) => q.item_id === userAns.question_id);
-    
+    const dbAnswer = dbItems.rows.find((question) => question.item_id === userAns.question_id);
+
     if (dbAnswer) {
-      // Ubah opsi JSON di DB menjadi Array (karena dari database PostgreSQL biasanya berbentuk String JSON)
       const optionsArray = typeof dbAnswer.options === 'string' ? JSON.parse(dbAnswer.options) : dbAnswer.options;
-      
-      // Konversi "A" -> 0, "B" -> 1, dst.
+
       const userIndex = letterToIndex[userAns.user_answer.toUpperCase()];
       const selectedText = optionsArray[userIndex];
 
-      // Cek kebenaran jawaban berdasarkan teksnya
-      if (
-        selectedText &&
-        selectedText.trim().toLowerCase() === dbAnswer.correct_answer.trim().toLowerCase()
-      ) {
+      if ( selectedText && selectedText.trim().toLowerCase() === dbAnswer.correct_answer.trim().toLowerCase()) {
         jumlah_benar++;
       }
     }
+
   });
 
-  // 3. Logika cold start - Kalkulasi Logit
-  let p = jumlah_benar / total_soal;
-  if (p === 0) p = 0.05;
-  if (p === 1) p = 0.95;
-
-  let theta_awal = Math.log(p / (1 - p));
-  theta_awal = Math.round(theta_awal * 1000) / 1000;
+  // panggil fungsi cold start
+  const theta_awal = await coldStart(jumlah_benar, total_soal);
 
   const ability_id = `ability-id-${crypto.randomUUID()}`;
 
@@ -141,8 +127,21 @@ const evaluateAndSaveTheta = async (user_id, session_id, answers) => {
         last_updated = CURRENT_TIMESTAMP`,
     [ability_id, user_id, parseFloat(theta_awal)]
   );
-
+  
   return { jumlah_benar, total_soal, theta_awal };
 };
+
+const coldStart = async(jumlah_benar, total_soal) => {
+  let p = jumlah_benar / total_soal;
+  if (p === 0) p = 0.05;
+  if (p === 1) p = 0.95;
+
+  // persamaan logit odds
+  let theta_awal = Math.log(p / (1 - p));
+  theta_awal = Math.round(theta_awal * 1000) / 1000;
+  
+  return theta_awal;
+}
+
 
 module.exports = { generateQuestionsForUser, evaluateAndSaveTheta, checkUserStatus };

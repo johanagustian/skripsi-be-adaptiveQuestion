@@ -9,7 +9,6 @@ const uploadDoc = async (req, res, next) => {
             return res.status(400).json({ status: 'fail', message: 'File dokumen tidak ditemukan' });
         }
 
-        // Menggunakan file.originalname sebagai nama dokumen otomatis di database
         const newDoc = await documentService.saveDocument(user_id, file.originalname, file.path);
 
         return res.status(201).json({

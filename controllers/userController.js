@@ -7,7 +7,7 @@ const registerUser = async (req, res, next) => {
     if (error) {
       return res.status(400).json({
         status: 'failed',
-        message: error.details[0].message // Mengambil pesan error asli dari Joi
+        message: error.details[0].message
       });
     }
 
