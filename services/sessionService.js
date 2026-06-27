@@ -368,6 +368,7 @@ const getSessionReview = async (session_id, user_id) => {
             lh.user_answer,
             gq.correct_answer,
             lh.is_correct,
+            lh.theta_before,
             gq.difficulty_level,
             dc.context_text AS reading_context
         FROM learning_history lh
