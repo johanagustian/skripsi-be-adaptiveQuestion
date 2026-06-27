@@ -102,14 +102,14 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
     "SELECT theta_score FROM user_abilities WHERE user_id = $1",
     [user_id],
   );
-  const current_theta = abilityQuery.rows[0]?.theta_score || 0.0;
+  const current_theta = abilityQuery.rows[0].theta_score;
 
   let difficulty_str = "middle";
   let expected_b_parameter = -0.5;
 
-  if (current_theta > 0) {
+  if (current_theta >= 0) {
     difficulty_str = "high";
-    expected_b_parameter = 5.0;
+    expected_b_parameter = 0.5;
   }
 
   // Ambil satu chunk acak dari dokumen yang dipilih
@@ -165,6 +165,8 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
       question_text: generatedData.question_text,
       options: generatedData.options,
       difficulty_level: difficulty_str,
+      b_parameter: expected_b_parameter,
+      current_theta: current_theta,
     };
   } catch (error) {
     throw new Error(
@@ -172,83 +174,6 @@ const getNextQuestion = async (session_id, user_id, document_id) => {
         (error.response?.data?.detail || error.message),
     );
   }
-};
-
-const getSessionSummary = async (session_id) => {
-
-  const sessionCheck = await pool.query(
-    `SELECT s.session_id, d.file_name 
-        FROM sessions s
-        JOIN documents d ON d.document_id = s.document_id
-        WHERE session_id = $1`,
-    [session_id],
-  );
-
-  const sessionData = sessionCheck.rows[0];
-
-  if (!sessionData) {
-    const error = new Error("Sesi tidak ditemukan atau tidak valid");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const fileName = sessionData.file_name;
-
-  // Mengambil seluruh riwayat jawaban serta data tingkat kesulitan soalnya
-  const query = `
-        SELECT 
-            lh.is_correct, 
-            lh.theta_before, 
-            lh.theta_after,
-            gq.difficulty_level,
-            gq.b_parameter
-        FROM learning_history lh
-        JOIN generate_questions gq ON lh.question_id = gq.question_id
-        WHERE lh.session_id = $1 
-        ORDER BY lh.created_at ASC
-    `;
-  const result = await pool.query(query, [session_id]);
-  const answers = result.rows;
-  const total_questions_answered = answers.length;
-
-  if (total_questions_answered === 0) {
-    return { message: "Belum ada soal yang dijawab pada sesi ini." };
-  }
-
-  // Hitung statistik dasar (Benar/Salah)
-  const total_correct = answers.filter((a) => a.is_correct === true).length;
-  const total_wrong = total_questions_answered - total_correct;
-
-  // 3. Kalkulasi pergerakan Theta (Awal vs Akhir)
-  const initial_theta = answers[0].theta_before;
-  const final_theta = answers[answers.length - 1].theta_after;
-
-  // Menghitung selisih (delta) dan membulatkannya ke 3 angka di belakang koma
-  let theta_delta = final_theta - initial_theta;
-  theta_delta = Math.round(theta_delta * 1000) / 1000;
-
-  // 4. Format data array (Time-series) khusus untuk grafik (Chart) di frontend
-  const chart_data = answers.map((ans, index) => ({
-    step: index + 1,
-    theta_score: ans.theta_after,
-    difficulty: ans.difficulty_level,
-    b_parameter: ans.b_parameter,
-    is_correct: ans.is_correct,
-  }));
-
-  return {
-    session_id,
-    fileName,
-    summary: {
-      total_questions: total_questions_answered,
-      total_correct,
-      total_wrong,
-      initial_theta: Math.round(initial_theta * 1000) / 1000,
-      final_theta: Math.round(final_theta * 1000) / 1000,
-      theta_delta: theta_delta > 0 ? `+${theta_delta}` : `${theta_delta}`, // Output: "+0.45" atau "-0.12"
-    },
-    history_chart: chart_data,
-  };
 };
 
 // Real-time update jawaban user dan perhitungan Theta
@@ -339,6 +264,84 @@ const updateTheta = async (current_theta, S, probability_irt, learning_rate = 0.
   return current_theta + learning_rate * (S - probability_irt);
 }
 
+const getSessionSummary = async (session_id) => {
+
+  const sessionCheck = await pool.query(
+    `SELECT s.session_id, d.file_name 
+        FROM sessions s
+        JOIN documents d ON d.document_id = s.document_id
+        WHERE session_id = $1`,
+    [session_id],
+  );
+
+  const sessionData = sessionCheck.rows[0];
+
+  if (!sessionData) {
+    const error = new Error("Sesi tidak ditemukan atau tidak valid");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const fileName = sessionData.file_name;
+
+  // Mengambil seluruh riwayat jawaban serta data tingkat kesulitan soalnya
+  const query = `
+        SELECT 
+            lh.is_correct, 
+            lh.theta_before, 
+            lh.theta_after,
+            gq.difficulty_level,
+            gq.b_parameter
+        FROM learning_history lh
+        JOIN generate_questions gq ON lh.question_id = gq.question_id
+        WHERE lh.session_id = $1 
+        ORDER BY lh.created_at ASC
+    `;
+  const result = await pool.query(query, [session_id]);
+  const answers = result.rows;
+  const total_questions_answered = answers.length;
+
+  if (total_questions_answered === 0) {
+    return { message: "Belum ada soal yang dijawab pada sesi ini." };
+  }
+
+  // Hitung statistik dasar (Benar/Salah)
+  const total_correct = answers.filter((a) => a.is_correct === true).length;
+  const total_wrong = total_questions_answered - total_correct;
+
+  // 3. Kalkulasi pergerakan Theta (Awal vs Akhir)
+  const initial_theta = answers[0].theta_before;
+  const final_theta = answers[answers.length - 1].theta_after;
+
+  // Menghitung selisih (delta) dan membulatkannya ke 3 angka di belakang koma
+  let theta_delta = final_theta - initial_theta;
+  theta_delta = Math.round(theta_delta * 1000) / 1000;
+
+  // 4. Format data array (Time-series) khusus untuk grafik (Chart) di frontend
+  const chart_data = answers.map((ans, index) => ({
+    step: index + 1,
+    theta_score: ans.theta_after,
+    difficulty: ans.difficulty_level,
+    b_parameter: ans.b_parameter,
+    is_correct: ans.is_correct,
+  }));
+
+  return {
+    session_id,
+    fileName,
+    summary: {
+      total_questions: total_questions_answered,
+      total_correct,
+      total_wrong,
+      initial_theta: Math.round(initial_theta * 1000) / 1000,
+      final_theta: Math.round(final_theta * 1000) / 1000,
+      theta_delta: theta_delta > 0 ? `+${theta_delta}` : `${theta_delta}`, // Output: "+0.45" atau "-0.12"
+    },
+    history_chart: chart_data,
+  };
+};
+
+
 const terminateSession = async (session_id) => {
   // Opsional: Kunci sesi jika tabel sessions memiliki kolom status
   // await pool.query("UPDATE sessions SET status = 'completed' WHERE session_id = $1", [session_id]);
@@ -366,10 +369,10 @@ const getSessionReview = async (session_id, user_id) => {
             gq.correct_answer,
             lh.is_correct,
             gq.difficulty_level,
-            dc.context_text AS reading_context  -- Tambahkan ini
+            dc.context_text AS reading_context
         FROM learning_history lh
         JOIN generate_questions gq ON lh.question_id = gq.question_id
-        JOIN document_chunks dc ON gq.chunk_id = dc.chunk_id  -- Tambahkan JOIN ini
+        JOIN document_chunks dc ON gq.chunk_id = dc.chunk_id
         JOIN sessions s ON s.session_id = lh.session_id
         JOIN documents d ON d.document_id = s.document_id
         WHERE lh.session_id = $1 AND lh.user_id = $2
